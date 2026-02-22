@@ -57,7 +57,7 @@ SRT_COLORS = [
 ]
 
 SRT_TIMING_RE = re.compile(
-    r"^(?P<start>\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(?P<end>\d{2}:\d{2}:\d{2},\d{3})(?:\s+.*)?$"
+    r"^(?P<start>\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(?P<end>\d{2}:\d{2}:\d{2},\d{3})(?P<settings>\s+.*)?$"
 )
 
 
@@ -197,6 +197,7 @@ class Match:
     start: int
     end: int
     label: str
+    spans: tuple[tuple[int, int], ...]
 
 
 @dataclass
@@ -214,8 +215,15 @@ class SubtitleCue:
     text_lines: list[str]
 
 
-def build_patterns(verbs: Iterable[PhrasalVerb]) -> list[tuple[PhrasalVerb, re.Pattern[str]]]:
-    patterns: list[tuple[PhrasalVerb, re.Pattern[str]]] = []
+@dataclass(frozen=True)
+class PatternSpec:
+    verb: PhrasalVerb
+    pattern: re.Pattern[str]
+    group_names: tuple[str, ...]
+
+
+def build_patterns(verbs: Iterable[PhrasalVerb]) -> list[PatternSpec]:
+    patterns: list[PatternSpec] = []
     for verb in verbs:
         words = verb.words
         if len(words) < 2:
@@ -223,20 +231,41 @@ def build_patterns(verbs: Iterable[PhrasalVerb]) -> list[tuple[PhrasalVerb, re.P
 
         if verb.separable and len(words) == 2:
             # e.g., "pick up" -> "pick it up", "pick the phone up"
-            regex = rf"\b{words[0]}\b(?:\s+\w+){{0,2}}\s+\b{words[1]}\b"
+            regex = (
+                rf"(?P<verb1>\b{re.escape(words[0])}\b)"
+                rf"(?:\s+\w+){{0,2}}\s+"
+                rf"(?P<verb2>\b{re.escape(words[1])}\b)"
+            )
+            group_names = ("verb1", "verb2")
         else:
-            regex = rf"\b{'\\s+'.join(words)}\b"
+            joined_words = r"\s+".join(re.escape(word) for word in words)
+            regex = rf"(?P<verb>\b{joined_words}\b)"
+            group_names = ("verb",)
 
-        patterns.append((verb, re.compile(regex, flags=re.IGNORECASE)))
+        patterns.append(
+            PatternSpec(
+                verb=verb,
+                pattern=re.compile(regex, flags=re.IGNORECASE),
+                group_names=group_names,
+            )
+        )
 
     return patterns
 
 
-def find_matches(text: str, patterns: list[tuple[PhrasalVerb, re.Pattern[str]]]) -> list[Match]:
+def find_matches(text: str, patterns: list[PatternSpec]) -> list[Match]:
     candidates: list[Match] = []
-    for verb, pattern in patterns:
-        for m in pattern.finditer(text):
-            candidates.append(Match(m.start(), m.end(), verb.base))
+    for spec in patterns:
+        for m in spec.pattern.finditer(text):
+            spans = tuple((m.start(name), m.end(name)) for name in spec.group_names)
+            candidates.append(
+                Match(
+                    start=min(span[0] for span in spans),
+                    end=max(span[1] for span in spans),
+                    label=spec.verb.base,
+                    spans=spans,
+                )
+            )
 
     # Prefer earlier matches, and longer spans when they start at same place.
     candidates.sort(key=lambda x: (x.start, -(x.end - x.start)))
@@ -255,13 +284,16 @@ def highlight_ansi(line: str, matches: list[Match], color_map: dict[str, str]) -
     if not matches:
         return line
 
+    render_spans = sorted(
+        (span[0], span[1], m.label) for m in matches for span in m.spans
+    )
     out: list[str] = []
     cursor = 0
-    for m in matches:
-        out.append(line[cursor : m.start])
-        color = color_map[m.label]
-        out.append(f"{color}{line[m.start:m.end]}{ANSI_RESET}")
-        cursor = m.end
+    for start, end, label in render_spans:
+        out.append(line[cursor:start])
+        color = color_map[label]
+        out.append(f"{color}{line[start:end]}{ANSI_RESET}")
+        cursor = end
     out.append(line[cursor:])
     return "".join(out)
 
@@ -270,14 +302,17 @@ def highlight_html(line: str, matches: list[Match], color_map: dict[str, str]) -
     if not matches:
         return html.escape(line)
 
+    render_spans = sorted(
+        (span[0], span[1], m.label) for m in matches for span in m.spans
+    )
     out: list[str] = []
     cursor = 0
-    for m in matches:
-        out.append(html.escape(line[cursor : m.start]))
-        color = color_map[m.label]
-        chunk = html.escape(line[m.start:m.end])
+    for start, end, label in render_spans:
+        out.append(html.escape(line[cursor:start]))
+        color = color_map[label]
+        chunk = html.escape(line[start:end])
         out.append(f'<span style="color:{color}; font-weight:700;">{chunk}</span>')
-        cursor = m.end
+        cursor = end
     out.append(html.escape(line[cursor:]))
     return "".join(out)
 
@@ -286,13 +321,16 @@ def highlight_srt(line: str, matches: list[Match], color_map: dict[str, str]) ->
     if not matches:
         return line
 
+    render_spans = sorted(
+        (span[0], span[1], m.label) for m in matches for span in m.spans
+    )
     out: list[str] = []
     cursor = 0
-    for m in matches:
-        out.append(line[cursor : m.start])
-        color = color_map[m.label]
-        out.append(f'<font color="{color}"><b>{line[m.start:m.end]}</b></font>')
-        cursor = m.end
+    for start, end, label in render_spans:
+        out.append(line[cursor:start])
+        color = color_map[label]
+        out.append(f'<font color="{color}"><b>{line[start:end]}</b></font>')
+        cursor = end
     out.append(line[cursor:])
     return "".join(out)
 
@@ -359,7 +397,24 @@ def process_text(content: str, html_mode: bool, seed: int) -> tuple[str, int]:
     return "\n".join(rendered), analysis.total_matches
 
 
-def process_text_srt(content: str, seed: int) -> tuple[str, int]:
+def shift_srt_timings(content: str, shift_ms: int) -> str:
+    if shift_ms == 0:
+        return content
+
+    shifted_lines: list[str] = []
+    for line in content.splitlines():
+        timing = SRT_TIMING_RE.match(line.strip())
+        if not timing:
+            shifted_lines.append(line)
+            continue
+        start = shift_srt_timestamp(timing.group("start"), shift_ms)
+        end = shift_srt_timestamp(timing.group("end"), shift_ms)
+        settings = timing.group("settings") or ""
+        shifted_lines.append(f"{start} --> {end}{settings}")
+    return "\n".join(shifted_lines)
+
+
+def process_text_srt(content: str, seed: int, shift_ms: int = 0) -> tuple[str, int]:
     analysis = analyze_content(content, html_mode=True, seed=seed)
     srt_color_map = choose_color_map_from_palette(
         [m.label for line_matches in analysis.line_matches for m in line_matches],
@@ -374,7 +429,9 @@ def process_text_srt(content: str, seed: int) -> tuple[str, int]:
             continue
         rendered.append(highlight_srt(line, matches, srt_color_map))
 
-    return "\n".join(rendered), analysis.total_matches
+    result = "\n".join(rendered)
+    result = shift_srt_timings(result, shift_ms)
+    return result, analysis.total_matches
 
 
 def parse_srt_cues(content: str) -> list[SubtitleCue]:
@@ -440,6 +497,16 @@ def ms_to_srt_timestamp(total_ms: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
 
 
+def srt_timestamp_to_ms(timestamp: str) -> int:
+    hours, minutes, seconds, millis = map(int, re.split(r"[:,]", timestamp))
+    return ((hours * 60 + minutes) * 60 + seconds) * 1000 + millis
+
+
+def shift_srt_timestamp(timestamp: str, shift_ms: int) -> str:
+    shifted = max(0, srt_timestamp_to_ms(timestamp) + shift_ms)
+    return ms_to_srt_timestamp(shifted)
+
+
 def srt_to_ass_timestamp(timestamp: str) -> str:
     hours, minutes, seconds, millis = map(int, re.split(r"[:,]", timestamp))
     total_centis = (hours * 3600 + minutes * 60 + seconds) * 100 + (millis // 10)
@@ -467,19 +534,23 @@ def highlight_ass(line: str, matches: list[Match], color_map: dict[str, str]) ->
     if not matches:
         return escape_ass_text(line)
 
+    render_spans = sorted(
+        (span[0], span[1], m.label) for m in matches for span in m.spans
+    )
     out: list[str] = []
     cursor = 0
-    for m in matches:
-        out.append(escape_ass_text(line[cursor : m.start]))
-        color = color_map[m.label]
-        chunk = escape_ass_text(line[m.start : m.end])
-        out.append(f"{{\\1c{color}\\b1}}{chunk}{{\\r}}")
-        cursor = m.end
+    for start, end, label in render_spans:
+        out.append(escape_ass_text(line[cursor:start]))
+        color = color_map[label]
+        chunk = escape_ass_text(line[start:end])
+        # Explicitly reset color/bold for broad player compatibility.
+        out.append(f"{{\\1c{color}\\b1}}{chunk}{{\\1c&HFFFFFF&\\b0}}")
+        cursor = end
     out.append(escape_ass_text(line[cursor:]))
     return "".join(out)
 
 
-def process_text_ass(content: str, seed: int) -> tuple[str, int]:
+def process_text_ass(content: str, seed: int, shift_ms: int = 0) -> tuple[str, int]:
     cues = parse_srt_cues(content)
     if not cues:
         cues = parse_plain_text_cues(content)
@@ -503,6 +574,8 @@ def process_text_ass(content: str, seed: int) -> tuple[str, int]:
 
     events: list[str] = []
     for cue, line_matches in zip(cues, cue_line_matches):
+        start = shift_srt_timestamp(cue.start, shift_ms) if shift_ms else cue.start
+        end = shift_srt_timestamp(cue.end, shift_ms) if shift_ms else cue.end
         rendered_lines = [
             highlight_ass(line, matches, ass_color_map)
             for line, matches in zip(cue.text_lines, line_matches)
@@ -510,8 +583,8 @@ def process_text_ass(content: str, seed: int) -> tuple[str, int]:
         text = "\\N".join(rendered_lines) if rendered_lines else " "
         events.append(
             "Dialogue: 0,"
-            f"{srt_to_ass_timestamp(cue.start)},"
-            f"{srt_to_ass_timestamp(cue.end)},"
+            f"{srt_to_ass_timestamp(start)},"
+            f"{srt_to_ass_timestamp(end)},"
             f"Default,,0,0,0,,{text}"
         )
 
@@ -598,6 +671,12 @@ def main() -> None:
     )
     parser.add_argument("-o", "--output", type=Path, help="Output file path")
     parser.add_argument("--seed", type=int, default=7, help="Color shuffle seed (default: 7)")
+    parser.add_argument(
+        "--shift-ms",
+        type=int,
+        default=0,
+        help="Subtitle timing shift in milliseconds (positive delays subtitles, negative advances)",
+    )
 
     args = parser.parse_args()
     if not args.input.exists():
@@ -605,9 +684,9 @@ def main() -> None:
 
     content = args.input.read_text(encoding="utf-8", errors="replace")
     if args.mode == "srt":
-        rendered, total = process_text_srt(content, seed=args.seed)
+        rendered, total = process_text_srt(content, seed=args.seed, shift_ms=args.shift_ms)
     elif args.mode == "ass":
-        rendered, total = process_text_ass(content, seed=args.seed)
+        rendered, total = process_text_ass(content, seed=args.seed, shift_ms=args.shift_ms)
     else:
         html_mode = args.mode == "html"
         rendered, total = process_text(content, html_mode=html_mode, seed=args.seed)

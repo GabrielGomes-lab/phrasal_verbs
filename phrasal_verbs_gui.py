@@ -29,6 +29,7 @@ class PhrasalVerbApp:
         self.last_rendered_srt: str = ""
         self.last_rendered_ass: str = ""
         self.seed_var = tk.IntVar(value=7)
+        self.sync_ms_var = tk.IntVar(value=0)
 
         self._build_ui()
 
@@ -47,6 +48,8 @@ class PhrasalVerbApp:
 
         ttk.Label(top, text="Seed:").pack(side=tk.LEFT, padx=(16, 4))
         ttk.Entry(top, width=6, textvariable=self.seed_var).pack(side=tk.LEFT)
+        ttk.Label(top, text="Sync ms:").pack(side=tk.LEFT, padx=(12, 4))
+        ttk.Entry(top, width=8, textvariable=self.sync_ms_var).pack(side=tk.LEFT)
 
         self.summary = ttk.Label(top, text="Matches: 0")
         self.summary.pack(side=tk.RIGHT)
@@ -96,6 +99,11 @@ class PhrasalVerbApp:
         except (TypeError, ValueError):
             messagebox.showerror("Invalid seed", "Seed must be an integer.")
             return
+        try:
+            sync_ms = int(self.sync_ms_var.get())
+        except (TypeError, ValueError):
+            messagebox.showerror("Invalid sync", "Sync ms must be an integer.")
+            return
 
         analysis = analyze_content(self.current_content, html_mode=True, seed=seed)
         self._render_colored_text(analysis)
@@ -111,8 +119,8 @@ class PhrasalVerbApp:
         source_name = self.current_file.name if self.current_file else "input"
         self.last_rendered_html = wrap_html("\n".join(html_lines), source_name)
 
-        self.last_rendered_srt, _ = process_text_srt(self.current_content, seed=seed)
-        self.last_rendered_ass, _ = process_text_ass(self.current_content, seed=seed)
+        self.last_rendered_srt, _ = process_text_srt(self.current_content, seed=seed, shift_ms=sync_ms)
+        self.last_rendered_ass, _ = process_text_ass(self.current_content, seed=seed, shift_ms=sync_ms)
 
     def _render_colored_text(self, analysis) -> None:
         self.text.config(state=tk.NORMAL)
@@ -125,9 +133,10 @@ class PhrasalVerbApp:
             for m in matches:
                 tag = f"verb_{m.label.replace(' ', '_')}"
                 self.text.tag_configure(tag, foreground=analysis.color_map[m.label])
-                start = f"{idx}.{m.start}"
-                end = f"{idx}.{m.end}"
-                self.text.tag_add(tag, start, end)
+                for span_start, span_end in m.spans:
+                    start = f"{idx}.{span_start}"
+                    end = f"{idx}.{span_end}"
+                    self.text.tag_add(tag, start, end)
 
         self.text.config(state=tk.DISABLED)
 
