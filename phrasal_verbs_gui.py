@@ -8,7 +8,13 @@ import html
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from highlight_phrasal_verbs import analyze_content, highlight_html, highlight_srt, wrap_html
+from highlight_phrasal_verbs import (
+    analyze_content,
+    highlight_html,
+    process_text_srt,
+    process_text_ass,
+    wrap_html,
+)
 
 
 class PhrasalVerbApp:
@@ -21,6 +27,7 @@ class PhrasalVerbApp:
         self.current_content: str = ""
         self.last_rendered_html: str = ""
         self.last_rendered_srt: str = ""
+        self.last_rendered_ass: str = ""
         self.seed_var = tk.IntVar(value=7)
 
         self._build_ui()
@@ -35,6 +42,7 @@ class PhrasalVerbApp:
         ttk.Button(top, text="Open subtitle", command=self.open_file).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="Run", command=self.run_analysis).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="Export SRT", command=self.export_srt).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="Export ASS", command=self.export_ass).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="Export HTML", command=self.export_html).pack(side=tk.LEFT, padx=4)
 
         ttk.Label(top, text="Seed:").pack(side=tk.LEFT, padx=(16, 4))
@@ -75,6 +83,7 @@ class PhrasalVerbApp:
         self.summary.config(text="Matches: 0")
         self.last_rendered_html = ""
         self.last_rendered_srt = ""
+        self.last_rendered_ass = ""
         self._set_text("File loaded. Click Run to analyze.")
 
     def run_analysis(self) -> None:
@@ -102,13 +111,8 @@ class PhrasalVerbApp:
         source_name = self.current_file.name if self.current_file else "input"
         self.last_rendered_html = wrap_html("\n".join(html_lines), source_name)
 
-        srt_lines: list[str] = []
-        for line, matches in zip(analysis.lines, analysis.line_matches):
-            if matches:
-                srt_lines.append(highlight_srt(line, matches, analysis.color_map))
-            else:
-                srt_lines.append(line)
-        self.last_rendered_srt = "\n".join(srt_lines)
+        self.last_rendered_srt, _ = process_text_srt(self.current_content, seed=seed)
+        self.last_rendered_ass, _ = process_text_ass(self.current_content, seed=seed)
 
     def _render_colored_text(self, analysis) -> None:
         self.text.config(state=tk.NORMAL)
@@ -173,6 +177,32 @@ class PhrasalVerbApp:
 
         try:
             Path(save_path).write_text(self.last_rendered_srt, encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror("Error", f"Could not save file:\n{exc}")
+            return
+
+        messagebox.showinfo("Saved", f"Exported:\n{save_path}")
+
+    def export_ass(self) -> None:
+        if not self.last_rendered_ass:
+            messagebox.showwarning("No output", "Run analysis first.")
+            return
+
+        default_name = "phrasal_verbs_output.ass"
+        if self.current_file:
+            default_name = f"{self.current_file.stem}_phrasal_verbs.ass"
+
+        save_path = filedialog.asksaveasfilename(
+            title="Export styled subtitle",
+            defaultextension=".ass",
+            initialfile=default_name,
+            filetypes=[("ASS subtitle", "*.ass")],
+        )
+        if not save_path:
+            return
+
+        try:
+            Path(save_path).write_text(self.last_rendered_ass, encoding="utf-8")
         except OSError as exc:
             messagebox.showerror("Error", f"Could not save file:\n{exc}")
             return

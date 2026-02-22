@@ -14,6 +14,7 @@ In the app:
 - Click `Open subtitle` to upload your file
 - Click `Run` to detect/highlight phrasal verbs
 - Click `Export SRT` to save a subtitle file for your video player
+- Click `Export ASS` for reliable colored subtitles (recommended for most players)
 - Optional: click `Export HTML` for browser review
 
 ## 2) Command line mode
@@ -36,6 +37,12 @@ Export SRT (subtitle file with color tags):
 python3 highlight_phrasal_verbs.py episode.srt --mode srt -o episode_phrasal_verbs.srt
 ```
 
+Export ASS (advanced styled subtitles, best compatibility for coloring):
+
+```bash
+python3 highlight_phrasal_verbs.py episode.srt --mode ass -o episode_phrasal_verbs.ass
+```
+
 ## 3) Build executable (.exe)
 
 On Windows (or with a Windows environment), install PyInstaller and build:
@@ -55,5 +62,6 @@ dist/phrasal-verbs-gui.exe
 
 - Includes common phrasal verbs and several separable patterns (`pick it up`, `put it away`, etc.).
 - Subtitle metadata lines (index and timestamps) are preserved.
-- SRT highlighting uses `<font color=\"...\">...</font>`, supported by many players (e.g., VLC).
+- SRT inline colors are player-dependent; some players ignore SRT styling completely.
+- ASS export is the most reliable way to keep colored phrasal-verb highlights.
 - Use the `Seed` field to change color assignment.

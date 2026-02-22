@@ -43,6 +43,23 @@ HTML_COLORS = [
     "#0ea5e9",
 ]
 
+SRT_COLORS = [
+    "yellow",
+    "cyan",
+    "lime",
+    "red",
+    "magenta",
+    "deepskyblue",
+    "orange",
+    "springgreen",
+    "gold",
+    "white",
+]
+
+SRT_TIMING_RE = re.compile(
+    r"^(?P<start>\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(?P<end>\d{2}:\d{2}:\d{2},\d{3})(?:\s+.*)?$"
+)
+
 
 @dataclass(frozen=True)
 class PhrasalVerb:
@@ -190,6 +207,13 @@ class AnalysisResult:
     total_matches: int
 
 
+@dataclass(frozen=True)
+class SubtitleCue:
+    start: str
+    end: str
+    text_lines: list[str]
+
+
 def build_patterns(verbs: Iterable[PhrasalVerb]) -> list[tuple[PhrasalVerb, re.Pattern[str]]]:
     patterns: list[tuple[PhrasalVerb, re.Pattern[str]]] = []
     for verb in verbs:
@@ -267,7 +291,7 @@ def highlight_srt(line: str, matches: list[Match], color_map: dict[str, str]) ->
     for m in matches:
         out.append(line[cursor : m.start])
         color = color_map[m.label]
-        out.append(f'<font color="{color}">{line[m.start:m.end]}</font>')
+        out.append(f'<font color="{color}"><b>{line[m.start:m.end]}</b></font>')
         cursor = m.end
     out.append(line[cursor:])
     return "".join(out)
@@ -278,15 +302,20 @@ def is_subtitle_metadata(line: str) -> bool:
     return bool(stripped.isdigit() or TIMESTAMP_RE.match(stripped))
 
 
-def choose_color_map(labels: list[str], html_mode: bool, seed: int) -> dict[str, str]:
+def choose_color_map_from_palette(labels: list[str], palette: list[str], seed: int) -> dict[str, str]:
     rng = random.Random(seed)
-    palette = HTML_COLORS[:] if html_mode else ANSI_COLORS[:]
-    rng.shuffle(palette)
+    shuffled = palette[:]
+    rng.shuffle(shuffled)
 
     color_map: dict[str, str] = {}
     for i, label in enumerate(sorted(set(labels))):
-        color_map[label] = palette[i % len(palette)]
+        color_map[label] = shuffled[i % len(shuffled)]
     return color_map
+
+
+def choose_color_map(labels: list[str], html_mode: bool, seed: int) -> dict[str, str]:
+    palette = HTML_COLORS if html_mode else ANSI_COLORS
+    return choose_color_map_from_palette(labels, palette, seed)
 
 
 def analyze_content(content: str, html_mode: bool, seed: int) -> AnalysisResult:
@@ -332,15 +361,178 @@ def process_text(content: str, html_mode: bool, seed: int) -> tuple[str, int]:
 
 def process_text_srt(content: str, seed: int) -> tuple[str, int]:
     analysis = analyze_content(content, html_mode=True, seed=seed)
+    srt_color_map = choose_color_map_from_palette(
+        [m.label for line_matches in analysis.line_matches for m in line_matches],
+        SRT_COLORS,
+        seed,
+    )
     rendered: list[str] = []
 
     for line, matches in zip(analysis.lines, analysis.line_matches):
         if not matches:
             rendered.append(line)
             continue
-        rendered.append(highlight_srt(line, matches, analysis.color_map))
+        rendered.append(highlight_srt(line, matches, srt_color_map))
 
     return "\n".join(rendered), analysis.total_matches
+
+
+def parse_srt_cues(content: str) -> list[SubtitleCue]:
+    lines = content.splitlines()
+    cues: list[SubtitleCue] = []
+    i = 0
+
+    while i < len(lines):
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        if i >= len(lines):
+            break
+
+        if lines[i].strip().isdigit():
+            i += 1
+            if i >= len(lines):
+                break
+
+        timing = SRT_TIMING_RE.match(lines[i].strip())
+        if not timing:
+            while i < len(lines) and lines[i].strip():
+                i += 1
+            continue
+
+        start = timing.group("start")
+        end = timing.group("end")
+        i += 1
+
+        cue_lines: list[str] = []
+        while i < len(lines) and lines[i].strip():
+            cue_lines.append(lines[i])
+            i += 1
+
+        cues.append(SubtitleCue(start=start, end=end, text_lines=cue_lines))
+
+    return cues
+
+
+def parse_plain_text_cues(content: str) -> list[SubtitleCue]:
+    cues: list[SubtitleCue] = []
+    start_ms = 0
+    duration_ms = 2500
+    gap_ms = 200
+    for line in content.splitlines():
+        if not line.strip():
+            continue
+        end_ms = start_ms + duration_ms
+        cues.append(
+            SubtitleCue(
+                start=ms_to_srt_timestamp(start_ms),
+                end=ms_to_srt_timestamp(end_ms),
+                text_lines=[line],
+            )
+        )
+        start_ms = end_ms + gap_ms
+    return cues
+
+
+def ms_to_srt_timestamp(total_ms: int) -> str:
+    hours, rem = divmod(total_ms, 3_600_000)
+    minutes, rem = divmod(rem, 60_000)
+    seconds, millis = divmod(rem, 1_000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+
+def srt_to_ass_timestamp(timestamp: str) -> str:
+    hours, minutes, seconds, millis = map(int, re.split(r"[:,]", timestamp))
+    total_centis = (hours * 3600 + minutes * 60 + seconds) * 100 + (millis // 10)
+    ass_hours, rem = divmod(total_centis, 360000)
+    ass_minutes, rem = divmod(rem, 6000)
+    ass_seconds, centis = divmod(rem, 100)
+    return f"{ass_hours}:{ass_minutes:02d}:{ass_seconds:02d}.{centis:02d}"
+
+
+def hex_to_ass_color(hex_color: str) -> str:
+    color = hex_color.strip().lstrip("#")
+    if len(color) != 6:
+        return "&H00FFFF&"
+    rr = color[0:2]
+    gg = color[2:4]
+    bb = color[4:6]
+    return f"&H{bb}{gg}{rr}&"
+
+
+def escape_ass_text(text: str) -> str:
+    return text.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
+
+
+def highlight_ass(line: str, matches: list[Match], color_map: dict[str, str]) -> str:
+    if not matches:
+        return escape_ass_text(line)
+
+    out: list[str] = []
+    cursor = 0
+    for m in matches:
+        out.append(escape_ass_text(line[cursor : m.start]))
+        color = color_map[m.label]
+        chunk = escape_ass_text(line[m.start : m.end])
+        out.append(f"{{\\1c{color}\\b1}}{chunk}{{\\r}}")
+        cursor = m.end
+    out.append(escape_ass_text(line[cursor:]))
+    return "".join(out)
+
+
+def process_text_ass(content: str, seed: int) -> tuple[str, int]:
+    cues = parse_srt_cues(content)
+    if not cues:
+        cues = parse_plain_text_cues(content)
+
+    patterns = build_patterns(PHRASAL_VERBS)
+    cue_line_matches: list[list[list[Match]]] = []
+    all_labels: list[str] = []
+
+    for cue in cues:
+        line_matches: list[list[Match]] = []
+        for line in cue.text_lines:
+            matches = find_matches(line, patterns)
+            line_matches.append(matches)
+            all_labels.extend(m.label for m in matches)
+        cue_line_matches.append(line_matches)
+
+    ass_color_map = {
+        label: hex_to_ass_color(color)
+        for label, color in choose_color_map_from_palette(all_labels, HTML_COLORS, seed).items()
+    }
+
+    events: list[str] = []
+    for cue, line_matches in zip(cues, cue_line_matches):
+        rendered_lines = [
+            highlight_ass(line, matches, ass_color_map)
+            for line, matches in zip(cue.text_lines, line_matches)
+        ]
+        text = "\\N".join(rendered_lines) if rendered_lines else " "
+        events.append(
+            "Dialogue: 0,"
+            f"{srt_to_ass_timestamp(cue.start)},"
+            f"{srt_to_ass_timestamp(cue.end)},"
+            f"Default,,0,0,0,,{text}"
+        )
+
+    header = """[Script Info]
+ScriptType: v4.00+
+Collisions: Normal
+PlayResX: 1280
+PlayResY: 720
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,42,&H00FFFFFF,&H000000FF,&H80000000,&H55000000,0,0,0,0,100,100,0,0,1,2,1,2,40,40,25,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    if events:
+        return header + "\n".join(events) + "\n", len(all_labels)
+    return header, len(all_labels)
 
 
 def wrap_html(body: str, source_name: str) -> str:
@@ -400,9 +592,9 @@ def main() -> None:
     parser.add_argument("input", type=Path, help="Path to .srt or .txt file")
     parser.add_argument(
         "--mode",
-        choices=["ansi", "html", "srt"],
+        choices=["ansi", "html", "srt", "ass"],
         default="ansi",
-        help="ansi = terminal colors, html = colored webpage, srt = subtitle with color tags",
+        help="ansi = terminal colors, html = colored webpage, srt = subtitle with color tags, ass = advanced styled subtitles",
     )
     parser.add_argument("-o", "--output", type=Path, help="Output file path")
     parser.add_argument("--seed", type=int, default=7, help="Color shuffle seed (default: 7)")
@@ -414,6 +606,8 @@ def main() -> None:
     content = args.input.read_text(encoding="utf-8", errors="replace")
     if args.mode == "srt":
         rendered, total = process_text_srt(content, seed=args.seed)
+    elif args.mode == "ass":
+        rendered, total = process_text_ass(content, seed=args.seed)
     else:
         html_mode = args.mode == "html"
         rendered, total = process_text(content, html_mode=html_mode, seed=args.seed)
