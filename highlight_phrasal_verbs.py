@@ -182,6 +182,14 @@ class Match:
     label: str
 
 
+@dataclass
+class AnalysisResult:
+    lines: list[str]
+    line_matches: list[list[Match]]
+    color_map: dict[str, str]
+    total_matches: int
+
+
 def build_patterns(verbs: Iterable[PhrasalVerb]) -> list[tuple[PhrasalVerb, re.Pattern[str]]]:
     patterns: list[tuple[PhrasalVerb, re.Pattern[str]]] = []
     for verb in verbs:
@@ -266,7 +274,7 @@ def choose_color_map(labels: list[str], html_mode: bool, seed: int) -> dict[str,
     return color_map
 
 
-def process_text(content: str, html_mode: bool, seed: int) -> tuple[str, int]:
+def analyze_content(content: str, html_mode: bool, seed: int) -> AnalysisResult:
     patterns = build_patterns(PHRASAL_VERBS)
     lines = content.splitlines()
 
@@ -283,19 +291,28 @@ def process_text(content: str, html_mode: bool, seed: int) -> tuple[str, int]:
         all_labels.extend(m.label for m in matches)
 
     color_map = choose_color_map(all_labels, html_mode=html_mode, seed=seed)
+    return AnalysisResult(
+        lines=lines,
+        line_matches=line_matches,
+        color_map=color_map,
+        total_matches=len(all_labels),
+    )
 
+
+def process_text(content: str, html_mode: bool, seed: int) -> tuple[str, int]:
+    analysis = analyze_content(content, html_mode=html_mode, seed=seed)
     rendered: list[str] = []
-    for line, matches in zip(lines, line_matches):
+    for line, matches in zip(analysis.lines, analysis.line_matches):
         if not matches:
             rendered.append(html.escape(line) if html_mode else line)
             continue
 
         if html_mode:
-            rendered.append(highlight_html(line, matches, color_map))
+            rendered.append(highlight_html(line, matches, analysis.color_map))
         else:
-            rendered.append(highlight_ansi(line, matches, color_map))
+            rendered.append(highlight_ansi(line, matches, analysis.color_map))
 
-    return "\n".join(rendered), len(all_labels)
+    return "\n".join(rendered), analysis.total_matches
 
 
 def wrap_html(body: str, source_name: str) -> str:
