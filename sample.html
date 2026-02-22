@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Phrasal Verb Highlighter</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+    }
+    body {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: radial-gradient(circle at top, #1f2937, var(--bg));
+      color: var(--text);
+      line-height: 1.55;
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 1.25rem auto;
+      padding: 1rem;
+    }
+    .meta {
+      color: var(--muted);
+      margin-bottom: 0.75rem;
+      font-size: 0.95rem;
+    }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: var(--panel);
+      border: 1px solid #374151;
+      border-radius: 10px;
+      padding: 1rem;
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="meta">Source: sample.srt</div>
+    <pre>1
+00:00:01,000 --&gt; 00:00:03,000
+Can you <span style="color:#22c55e; font-weight:700;">pick it up</span> and <span style="color:#a855f7; font-weight:700;">put it away</span>?
+
+2
+00:00:03,500 --&gt; 00:00:06,000
+I will <span style="color:#3b82f6; font-weight:700;">look after</span> the kid and then <span style="color:#f97316; font-weight:700;">go on</span>.</pre>
+  </div>
+</body>
+</html>
