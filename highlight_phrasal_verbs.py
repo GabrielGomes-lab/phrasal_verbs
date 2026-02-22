@@ -258,6 +258,21 @@ def highlight_html(line: str, matches: list[Match], color_map: dict[str, str]) -
     return "".join(out)
 
 
+def highlight_srt(line: str, matches: list[Match], color_map: dict[str, str]) -> str:
+    if not matches:
+        return line
+
+    out: list[str] = []
+    cursor = 0
+    for m in matches:
+        out.append(line[cursor : m.start])
+        color = color_map[m.label]
+        out.append(f'<font color="{color}">{line[m.start:m.end]}</font>')
+        cursor = m.end
+    out.append(line[cursor:])
+    return "".join(out)
+
+
 def is_subtitle_metadata(line: str) -> bool:
     stripped = line.strip()
     return bool(stripped.isdigit() or TIMESTAMP_RE.match(stripped))
@@ -311,6 +326,19 @@ def process_text(content: str, html_mode: bool, seed: int) -> tuple[str, int]:
             rendered.append(highlight_html(line, matches, analysis.color_map))
         else:
             rendered.append(highlight_ansi(line, matches, analysis.color_map))
+
+    return "\n".join(rendered), analysis.total_matches
+
+
+def process_text_srt(content: str, seed: int) -> tuple[str, int]:
+    analysis = analyze_content(content, html_mode=True, seed=seed)
+    rendered: list[str] = []
+
+    for line, matches in zip(analysis.lines, analysis.line_matches):
+        if not matches:
+            rendered.append(line)
+            continue
+        rendered.append(highlight_srt(line, matches, analysis.color_map))
 
     return "\n".join(rendered), analysis.total_matches
 
@@ -372,9 +400,9 @@ def main() -> None:
     parser.add_argument("input", type=Path, help="Path to .srt or .txt file")
     parser.add_argument(
         "--mode",
-        choices=["ansi", "html"],
+        choices=["ansi", "html", "srt"],
         default="ansi",
-        help="ansi = terminal colors, html = colored HTML output",
+        help="ansi = terminal colors, html = colored webpage, srt = subtitle with color tags",
     )
     parser.add_argument("-o", "--output", type=Path, help="Output file path")
     parser.add_argument("--seed", type=int, default=7, help="Color shuffle seed (default: 7)")
@@ -384,10 +412,13 @@ def main() -> None:
         raise SystemExit(f"Input file not found: {args.input}")
 
     content = args.input.read_text(encoding="utf-8", errors="replace")
-    html_mode = args.mode == "html"
-    rendered, total = process_text(content, html_mode=html_mode, seed=args.seed)
+    if args.mode == "srt":
+        rendered, total = process_text_srt(content, seed=args.seed)
+    else:
+        html_mode = args.mode == "html"
+        rendered, total = process_text(content, html_mode=html_mode, seed=args.seed)
 
-    if html_mode:
+    if args.mode == "html":
         rendered = wrap_html(rendered, args.input.name)
 
     if args.output:

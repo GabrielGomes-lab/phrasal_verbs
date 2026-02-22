@@ -13,7 +13,8 @@ python3 phrasal_verbs_gui.py
 In the app:
 - Click `Open subtitle` to upload your file
 - Click `Run` to detect/highlight phrasal verbs
-- Click `Export HTML` to save the colored output
+- Click `Export SRT` to save a subtitle file for your video player
+- Optional: click `Export HTML` for browser review
 
 ## 2) Command line mode
 
@@ -27,6 +28,12 @@ Export HTML:
 
 ```bash
 python3 highlight_phrasal_verbs.py episode.srt --mode html -o episode_phrasal_verbs.html
+```
+
+Export SRT (subtitle file with color tags):
+
+```bash
+python3 highlight_phrasal_verbs.py episode.srt --mode srt -o episode_phrasal_verbs.srt
 ```
 
 ## 3) Build executable (.exe)
@@ -48,4 +55,5 @@ dist/phrasal-verbs-gui.exe
 
 - Includes common phrasal verbs and several separable patterns (`pick it up`, `put it away`, etc.).
 - Subtitle metadata lines (index and timestamps) are preserved.
+- SRT highlighting uses `<font color=\"...\">...</font>`, supported by many players (e.g., VLC).
 - Use the `Seed` field to change color assignment.

@@ -1,0 +1,7 @@
+1
+00:00:01,000 --> 00:00:03,000
+Can you <font color="#22c55e">pick it up</font> and <font color="#a855f7">put it away</font>?
+
+2
+00:00:03,500 --> 00:00:06,000
+I will <font color="#3b82f6">look after</font> the kid and then <font color="#f97316">go on</font>.
