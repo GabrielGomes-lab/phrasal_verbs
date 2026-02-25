@@ -7,6 +7,7 @@ import html
 import queue
 import threading
 import tkinter as tk
+import zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -21,6 +22,19 @@ from highlight_phrasal_verbs import (
 
 
 class PhrasalVerbApp:
+    SUPPORTED_TEXT_EXTS = {
+        ".txt",
+        ".text",
+        ".md",
+        ".lrc",
+        ".log",
+        ".csv",
+        ".tsv",
+        ".srt",
+        ".ass",
+        ".vtt",
+    }
+
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Phrasal Verb Highlighter")
@@ -57,6 +71,8 @@ class PhrasalVerbApp:
 
         self.open_btn = ttk.Button(top, text="Open lyrics/subtitle", command=self.open_file)
         self.open_btn.pack(side=tk.LEFT, padx=4)
+        self.open_zip_btn = ttk.Button(top, text="Process ZIP", command=self.process_zip_package)
+        self.open_zip_btn.pack(side=tk.LEFT, padx=4)
         self.paste_btn = ttk.Button(top, text="Paste lyrics", command=self.open_paste_dialog)
         self.paste_btn.pack(side=tk.LEFT, padx=4)
         self.run_btn = ttk.Button(top, text="Run", command=self.run_analysis)
@@ -122,6 +138,49 @@ class PhrasalVerbApp:
 
         self.current_file = file_path
         self._set_loaded_source(str(file_path), "File loaded. Click Run to analyze.")
+
+    def process_zip_package(self) -> None:
+        if self.is_running:
+            return
+        zip_path = filedialog.askopenfilename(
+            title="Select subtitle ZIP package",
+            filetypes=[("ZIP archive", "*.zip"), ("All files", "*.*")],
+        )
+        if not zip_path:
+            return
+
+        output_dir = filedialog.askdirectory(title="Select output folder for processed files")
+        if not output_dir:
+            return
+
+        try:
+            seed = int(self.seed_var.get())
+        except (TypeError, ValueError):
+            messagebox.showerror("Invalid seed", "Seed must be an integer.")
+            return
+        try:
+            sync_ms = int(self.sync_ms_var.get())
+        except (TypeError, ValueError):
+            messagebox.showerror("Invalid sync", "Sync ms must be an integer.")
+            return
+
+        self._run_id += 1
+        run_id = self._run_id
+        self._cancel_event = threading.Event()
+
+        self._set_busy_ui(True)
+        self.file_label.config(text=f"ZIP: {Path(zip_path).name}")
+        self.summary.config(text="Matches: bulk mode")
+        self._set_text("Processing ZIP package...")
+        self.status_label.config(text="Running batch analysis in background...")
+
+        worker = threading.Thread(
+            target=self._zip_worker,
+            args=(Path(zip_path), Path(output_dir), seed, sync_ms, run_id, self._cancel_event),
+            daemon=True,
+        )
+        worker.start()
+        self._schedule_poll()
 
     def open_paste_dialog(self) -> None:
         dialog = tk.Toplevel(self.root)
@@ -252,6 +311,79 @@ class PhrasalVerbApp:
         except Exception as exc:  # pragma: no cover - defensive for GUI runtime
             self.analysis_queue.put({"ok": False, "run_id": run_id, "error": str(exc)})
 
+    def _zip_worker(
+        self,
+        zip_path: Path,
+        output_dir: Path,
+        seed: int,
+        sync_ms: int,
+        run_id: int,
+        cancel_event: threading.Event,
+    ) -> None:
+        try:
+            processed = 0
+            failed: list[str] = []
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            with zipfile.ZipFile(zip_path) as archive:
+                members = [
+                    m
+                    for m in archive.infolist()
+                    if not m.is_dir() and Path(m.filename).suffix.lower() in self.SUPPORTED_TEXT_EXTS
+                ]
+                if not members:
+                    raise ValueError("The ZIP does not contain supported subtitle/text files.")
+
+                for member in members:
+                    if cancel_event.is_set():
+                        return
+                    try:
+                        raw = archive.read(member)
+                        content = raw.decode("utf-8", errors="replace")
+                        source_name = Path(member.filename).name
+                        analysis = analyze_content(content, html_mode=True, seed=seed)
+                        html_lines: list[str] = []
+                        for line, matches in zip(analysis.lines, analysis.line_matches):
+                            if matches:
+                                html_lines.append(highlight_html(line, matches, analysis.color_map))
+                            else:
+                                html_lines.append(html.escape(line))
+                        rendered_html = wrap_html("\n".join(html_lines), source_name)
+                        rendered_srt, _ = process_text_srt(content, seed=seed, shift_ms=sync_ms)
+                        rendered_ass, _ = process_text_ass(content, seed=seed, shift_ms=sync_ms)
+                        report = build_match_report(analysis)
+
+                        safe_stem = Path(member.filename).with_suffix("").as_posix().replace("/", "__")
+                        (output_dir / f"{safe_stem}_phrasal_verbs.html").write_text(
+                            rendered_html, encoding="utf-8"
+                        )
+                        (output_dir / f"{safe_stem}_phrasal_verbs.srt").write_text(
+                            rendered_srt, encoding="utf-8"
+                        )
+                        (output_dir / f"{safe_stem}_phrasal_verbs.ass").write_text(
+                            rendered_ass, encoding="utf-8"
+                        )
+                        (output_dir / f"{safe_stem}_phrasal_verbs_report.txt").write_text(
+                            report, encoding="utf-8"
+                        )
+                        processed += 1
+                    except Exception as item_exc:  # pragma: no cover - GUI runtime guard
+                        failed.append(f"{member.filename}: {item_exc}")
+
+            self.analysis_queue.put(
+                {
+                    "ok": True,
+                    "kind": "batch",
+                    "run_id": run_id,
+                    "processed": processed,
+                    "failed": failed,
+                    "output_dir": str(output_dir),
+                    "source_zip": str(zip_path),
+                }
+            )
+        except Exception as exc:  # pragma: no cover - defensive for GUI runtime
+            self.analysis_queue.put({"ok": False, "run_id": run_id, "error": str(exc), "kind": "batch"})
+
     def _schedule_poll(self) -> None:
         if self._is_closing:
             return
@@ -276,6 +408,28 @@ class PhrasalVerbApp:
             self._set_busy_ui(False)
             messagebox.showerror("Error", f"Analysis failed:\n{result.get('error', 'Unknown error')}")
             self.status_label.config(text="Analysis failed")
+            return
+
+        if result.get("kind") == "batch":
+            self._set_busy_ui(False)
+            processed = result.get("processed", 0)
+            failed = result.get("failed", [])
+            output_dir = result.get("output_dir", "")
+            lines = [
+                f"Processed files: {processed}",
+                f"Failed files: {len(failed)}",
+                f"Output folder: {output_dir}",
+            ]
+            if failed:
+                lines.append("")
+                lines.append("Failed entries:")
+                lines.extend(failed[:10])
+                if len(failed) > 10:
+                    lines.append(f"... and {len(failed) - 10} more.")
+            summary_text = "\n".join(lines)
+            self._set_text(summary_text)
+            self.status_label.config(text="Batch ZIP processing complete")
+            messagebox.showinfo("ZIP complete", summary_text)
             return
 
         self.last_rendered_html = result["html"]
@@ -346,6 +500,7 @@ class PhrasalVerbApp:
         self.is_running = busy
         state = tk.DISABLED if busy else tk.NORMAL
         self.open_btn.config(state=state)
+        self.open_zip_btn.config(state=state)
         self.paste_btn.config(state=state)
         self.run_btn.config(state=state)
         self.export_srt_btn.config(state=state)
