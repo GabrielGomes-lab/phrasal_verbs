@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import html
 import random
 import re
@@ -222,24 +223,99 @@ class PatternSpec:
     group_names: tuple[str, ...]
 
 
+IRREGULAR_PAST: dict[str, str] = {
+    "be": "was",
+    "blow": "blew",
+    "break": "broke",
+    "bring": "brought",
+    "catch": "caught",
+    "come": "came",
+    "cut": "cut",
+    "do": "did",
+    "draw": "drew",
+    "drink": "drank",
+    "drive": "drove",
+    "eat": "ate",
+    "fall": "fell",
+    "find": "found",
+    "get": "got",
+    "give": "gave",
+    "go": "went",
+    "grow": "grew",
+    "hang": "hung",
+    "have": "had",
+    "hold": "held",
+    "keep": "kept",
+    "know": "knew",
+    "leave": "left",
+    "let": "let",
+    "make": "made",
+    "pay": "paid",
+    "put": "put",
+    "run": "ran",
+    "say": "said",
+    "see": "saw",
+    "set": "set",
+    "show": "showed",
+    "sit": "sat",
+    "stand": "stood",
+    "take": "took",
+    "think": "thought",
+    "throw": "threw",
+    "wake": "woke",
+    "wear": "wore",
+    "write": "wrote",
+}
+
+
+def third_person_singular(verb: str) -> str:
+    if verb.endswith("y") and len(verb) > 1 and verb[-2] not in "aeiou":
+        return f"{verb[:-1]}ies"
+    if verb.endswith(("o", "ch", "sh", "x", "s", "z")):
+        return f"{verb}es"
+    return f"{verb}s"
+
+
+def regular_past(verb: str) -> str:
+    if verb.endswith("e"):
+        return f"{verb}d"
+    if verb.endswith("y") and len(verb) > 1 and verb[-2] not in "aeiou":
+        return f"{verb[:-1]}ied"
+    return f"{verb}ed"
+
+
+def verb_tense_forms(verb: str) -> tuple[set[str], str]:
+    base = verb.lower()
+    present_forms = {base, third_person_singular(base)}
+    past_form = IRREGULAR_PAST.get(base, regular_past(base))
+    finite_forms = present_forms | {past_form}
+    finite_alt = "|".join(re.escape(v) for v in sorted(finite_forms, key=len, reverse=True))
+    future = (
+        rf"(?:will\s+{re.escape(base)}|"
+        rf"(?:am|is|are|was|were)\s+going\s+to\s+{re.escape(base)})"
+    )
+    return finite_forms, rf"(?:{future}|{finite_alt})"
+
+
 def build_patterns(verbs: Iterable[PhrasalVerb]) -> list[PatternSpec]:
     patterns: list[PatternSpec] = []
     for verb in verbs:
         words = verb.words
         if len(words) < 2:
             continue
+        _, first_word_pattern = verb_tense_forms(words[0])
 
         if verb.separable and len(words) == 2:
             # e.g., "pick up" -> "pick it up", "pick the phone up"
             regex = (
-                rf"(?P<verb1>\b{re.escape(words[0])}\b)"
+                rf"(?P<verb1>\b{first_word_pattern}\b)"
                 rf"(?:\s+\w+){{0,2}}\s+"
                 rf"(?P<verb2>\b{re.escape(words[1])}\b)"
             )
             group_names = ("verb1", "verb2")
         else:
-            joined_words = r"\s+".join(re.escape(word) for word in words)
-            regex = rf"(?P<verb>\b{joined_words}\b)"
+            tail_words = r"\s+".join(rf"\b{re.escape(word)}\b" for word in words[1:])
+            regex = rf"(?P<verb>\b{first_word_pattern}\b\s+{tail_words})"
             group_names = ("verb",)
 
         patterns.append(
@@ -251,6 +327,9 @@ def build_patterns(verbs: Iterable[PhrasalVerb]) -> list[PatternSpec]:
         )
 
     return patterns
+
+
+PATTERN_SPECS = build_patterns(PHRASAL_VERBS)
 
 
 def find_matches(text: str, patterns: list[PatternSpec]) -> list[Match]:
@@ -357,7 +436,6 @@ def choose_color_map(labels: list[str], html_mode: bool, seed: int) -> dict[str,
 
 
 def analyze_content(content: str, html_mode: bool, seed: int) -> AnalysisResult:
-    patterns = build_patterns(PHRASAL_VERBS)
     lines = content.splitlines()
 
     all_labels: list[str] = []
@@ -368,7 +446,7 @@ def analyze_content(content: str, html_mode: bool, seed: int) -> AnalysisResult:
             line_matches.append([])
             continue
 
-        matches = find_matches(line, patterns)
+        matches = find_matches(line, PATTERN_SPECS)
         line_matches.append(matches)
         all_labels.extend(m.label for m in matches)
 
@@ -555,14 +633,13 @@ def process_text_ass(content: str, seed: int, shift_ms: int = 0) -> tuple[str, i
     if not cues:
         cues = parse_plain_text_cues(content)
 
-    patterns = build_patterns(PHRASAL_VERBS)
     cue_line_matches: list[list[list[Match]]] = []
     all_labels: list[str] = []
 
     for cue in cues:
         line_matches: list[list[Match]] = []
         for line in cue.text_lines:
-            matches = find_matches(line, patterns)
+            matches = find_matches(line, PATTERN_SPECS)
             line_matches.append(matches)
             all_labels.extend(m.label for m in matches)
         cue_line_matches.append(line_matches)
@@ -606,6 +683,35 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     if events:
         return header + "\n".join(events) + "\n", len(all_labels)
     return header, len(all_labels)
+
+
+def build_match_report(analysis: AnalysisResult) -> str:
+    counts: collections.Counter[str] = collections.Counter()
+    for matches in analysis.line_matches:
+        counts.update(m.label for m in matches)
+
+    lines_with_matches: list[str] = []
+    for idx, (line, matches) in enumerate(zip(analysis.lines, analysis.line_matches), start=1):
+        if not matches:
+            continue
+        matched_labels = ", ".join(sorted({m.label for m in matches}))
+        lines_with_matches.append(f"{idx}: {line}\n   -> {matched_labels}")
+
+    top_section = ["Phrasal Verb Match Report", "=" * 26, f"Total matches: {analysis.total_matches}", ""]
+    if counts:
+        top_section.append("Counts by phrasal verb:")
+        for label, count in counts.most_common():
+            top_section.append(f"- {label}: {count}")
+    else:
+        top_section.append("No phrasal verbs detected.")
+
+    top_section.extend(["", "Matched lines:"])
+    if lines_with_matches:
+        top_section.extend(lines_with_matches)
+    else:
+        top_section.append("(none)")
+    top_section.append("")
+    return "\n".join(top_section)
 
 
 def wrap_html(body: str, source_name: str) -> str:
@@ -665,9 +771,9 @@ def main() -> None:
     parser.add_argument("input", type=Path, help="Path to .srt or .txt file")
     parser.add_argument(
         "--mode",
-        choices=["ansi", "html", "srt", "ass"],
+        choices=["ansi", "html", "srt", "ass", "report"],
         default="ansi",
-        help="ansi = terminal colors, html = colored webpage, srt = subtitle with color tags, ass = advanced styled subtitles",
+        help="ansi = terminal colors, html = colored webpage, srt = subtitle with color tags, ass = advanced styled subtitles, report = text summary with counts and matched lines",
     )
     parser.add_argument("-o", "--output", type=Path, help="Output file path")
     parser.add_argument("--seed", type=int, default=7, help="Color shuffle seed (default: 7)")
@@ -687,6 +793,10 @@ def main() -> None:
         rendered, total = process_text_srt(content, seed=args.seed, shift_ms=args.shift_ms)
     elif args.mode == "ass":
         rendered, total = process_text_ass(content, seed=args.seed, shift_ms=args.shift_ms)
+    elif args.mode == "report":
+        analysis = analyze_content(content, html_mode=True, seed=args.seed)
+        rendered = build_match_report(analysis)
+        total = analysis.total_matches
     else:
         html_mode = args.mode == "html"
         rendered, total = process_text(content, html_mode=html_mode, seed=args.seed)

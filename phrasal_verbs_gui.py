@@ -12,6 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from highlight_phrasal_verbs import (
     analyze_content,
+    build_match_report,
     highlight_html,
     process_text_ass,
     process_text_srt,
@@ -30,6 +31,7 @@ class PhrasalVerbApp:
         self.last_rendered_html: str = ""
         self.last_rendered_srt: str = ""
         self.last_rendered_ass: str = ""
+        self.last_report: str = ""
         self.seed_var = tk.IntVar(value=7)
         self.sync_ms_var = tk.IntVar(value=0)
 
@@ -37,8 +39,14 @@ class PhrasalVerbApp:
         self.analysis_queue: queue.Queue = queue.Queue()
         self._render_index = 0
         self._render_analysis = None
+        self._poll_after_id: str | None = None
+        self._render_after_id: str | None = None
+        self._is_closing = False
+        self._run_id = 0
+        self._cancel_event = threading.Event()
 
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
         top = ttk.Frame(self.root, padding=10)
@@ -49,6 +57,8 @@ class PhrasalVerbApp:
 
         self.open_btn = ttk.Button(top, text="Open lyrics/subtitle", command=self.open_file)
         self.open_btn.pack(side=tk.LEFT, padx=4)
+        self.paste_btn = ttk.Button(top, text="Paste lyrics", command=self.open_paste_dialog)
+        self.paste_btn.pack(side=tk.LEFT, padx=4)
         self.run_btn = ttk.Button(top, text="Run", command=self.run_analysis)
         self.run_btn.pack(side=tk.LEFT, padx=4)
         self.export_srt_btn = ttk.Button(top, text="Export SRT", command=self.export_srt)
@@ -57,6 +67,8 @@ class PhrasalVerbApp:
         self.export_ass_btn.pack(side=tk.LEFT, padx=4)
         self.export_html_btn = ttk.Button(top, text="Export HTML", command=self.export_html)
         self.export_html_btn.pack(side=tk.LEFT, padx=4)
+        self.export_report_btn = ttk.Button(top, text="Export Report", command=self.export_report)
+        self.export_report_btn.pack(side=tk.LEFT, padx=4)
 
         ttk.Label(top, text="Seed:").pack(side=tk.LEFT, padx=(16, 4))
         ttk.Entry(top, width=6, textvariable=self.seed_var).pack(side=tk.LEFT)
@@ -83,7 +95,10 @@ class PhrasalVerbApp:
         self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.text.insert("1.0", "Open a lyrics/subtitle file, click Run, then export HTML.")
+        self.text.insert(
+            "1.0",
+            "Open or paste lyrics/subtitles, click Run, then export HTML/SRT/ASS/report.",
+        )
         self.text.config(state=tk.DISABLED)
 
     def open_file(self) -> None:
@@ -106,19 +121,56 @@ class PhrasalVerbApp:
             return
 
         self.current_file = file_path
-        self.file_label.config(text=str(file_path))
+        self._set_loaded_source(str(file_path), "File loaded. Click Run to analyze.")
+
+    def open_paste_dialog(self) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Paste Lyrics")
+        dialog.geometry("760x520")
+        dialog.transient(self.root)
+
+        frame = ttk.Frame(dialog, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="Paste song lyrics or subtitle text:").pack(anchor=tk.W, pady=(0, 6))
+
+        editor = tk.Text(frame, wrap=tk.WORD, font=("Consolas", 11), undo=True)
+        editor.pack(fill=tk.BOTH, expand=True)
+
+        btns = ttk.Frame(frame)
+        btns.pack(fill=tk.X, pady=(8, 0))
+
+        def load_pasted() -> None:
+            content = editor.get("1.0", tk.END).strip("\n")
+            if not content.strip():
+                messagebox.showwarning("No lyrics", "Paste some text before loading.")
+                return
+            self.current_file = None
+            self.current_content = content
+            self._set_loaded_source("Pasted lyrics", "Lyrics loaded from text form. Click Run to analyze.")
+            dialog.destroy()
+
+        ttk.Button(btns, text="Load", command=load_pasted).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(btns, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
+
+        dialog.grab_set()
+        editor.focus_set()
+
+    def _set_loaded_source(self, source_label: str, text_message: str) -> None:
+        self.file_label.config(text=source_label)
         self.summary.config(text="Matches: 0")
         self.last_rendered_html = ""
         self.last_rendered_srt = ""
         self.last_rendered_ass = ""
-        self._set_text("File loaded. Click Run to analyze.")
+        self.last_report = ""
+        self._set_text(text_message)
         self.status_label.config(text="Ready")
 
     def run_analysis(self) -> None:
         if self.is_running:
             return
         if not self.current_content:
-            messagebox.showwarning("No file", "Open a lyrics/text file first.")
+            messagebox.showwarning("No content", "Open or paste lyrics/text first.")
             return
 
         try:
@@ -132,50 +184,92 @@ class PhrasalVerbApp:
             messagebox.showerror("Invalid sync", "Sync ms must be an integer.")
             return
 
+        self._run_id += 1
+        run_id = self._run_id
+        self._cancel_event = threading.Event()
+
         self._set_busy_ui(True)
         self._set_text("Processing...")
         self.status_label.config(text="Running analysis in background...")
 
-        threading.Thread(
+        source_name = self.current_file.name if self.current_file else "lyrics"
+        worker = threading.Thread(
             target=self._analysis_worker,
-            args=(self.current_content, seed, sync_ms),
+            args=(self.current_content, seed, sync_ms, source_name, run_id, self._cancel_event),
             daemon=True,
-        ).start()
-        self.root.after(100, self._poll_worker)
+        )
+        worker.start()
+        self._schedule_poll()
 
-    def _analysis_worker(self, content: str, seed: int, sync_ms: int) -> None:
+    def _analysis_worker(
+        self,
+        content: str,
+        seed: int,
+        sync_ms: int,
+        source_name: str,
+        run_id: int,
+        cancel_event: threading.Event,
+    ) -> None:
         try:
             analysis = analyze_content(content, html_mode=True, seed=seed)
+            if cancel_event.is_set():
+                return
 
             html_lines: list[str] = []
-            for line, matches in zip(analysis.lines, analysis.line_matches):
+            for idx, (line, matches) in enumerate(zip(analysis.lines, analysis.line_matches)):
+                if cancel_event.is_set():
+                    return
                 if matches:
                     html_lines.append(highlight_html(line, matches, analysis.color_map))
                 else:
                     html_lines.append(html.escape(line))
+                if idx and idx % 500 == 0 and cancel_event.is_set():
+                    return
 
-            source_name = self.current_file.name if self.current_file else "input"
             rendered_html = wrap_html("\n".join(html_lines), source_name)
+            if cancel_event.is_set():
+                return
             rendered_srt, _ = process_text_srt(content, seed=seed, shift_ms=sync_ms)
+            if cancel_event.is_set():
+                return
             rendered_ass, _ = process_text_ass(content, seed=seed, shift_ms=sync_ms)
+            if cancel_event.is_set():
+                return
+
+            report = build_match_report(analysis)
 
             self.analysis_queue.put(
                 {
                     "ok": True,
+                    "run_id": run_id,
                     "analysis": analysis,
                     "html": rendered_html,
                     "srt": rendered_srt,
                     "ass": rendered_ass,
+                    "report": report,
                 }
             )
         except Exception as exc:  # pragma: no cover - defensive for GUI runtime
-            self.analysis_queue.put({"ok": False, "error": str(exc)})
+            self.analysis_queue.put({"ok": False, "run_id": run_id, "error": str(exc)})
+
+    def _schedule_poll(self) -> None:
+        if self._is_closing:
+            return
+        self._poll_after_id = self.root.after(100, self._poll_worker)
 
     def _poll_worker(self) -> None:
+        self._poll_after_id = None
+        if self._is_closing:
+            return
+
         try:
             result = self.analysis_queue.get_nowait()
         except queue.Empty:
-            self.root.after(100, self._poll_worker)
+            self._schedule_poll()
+            return
+
+        if result.get("run_id") != self._run_id:
+            self._schedule_poll()
             return
 
         if not result.get("ok"):
@@ -187,12 +281,16 @@ class PhrasalVerbApp:
         self.last_rendered_html = result["html"]
         self.last_rendered_srt = result["srt"]
         self.last_rendered_ass = result["ass"]
+        self.last_report = result["report"]
         analysis = result["analysis"]
         self.summary.config(text=f"Matches: {analysis.total_matches}")
 
         self._render_analysis_in_chunks(analysis)
 
     def _render_analysis_in_chunks(self, analysis) -> None:
+        if self._is_closing:
+            return
+
         self._render_analysis = analysis
         self._render_index = 0
         self.text.config(state=tk.NORMAL)
@@ -209,7 +307,10 @@ class PhrasalVerbApp:
         self.status_label.config(text="Rendering output...")
         self._render_next_chunk()
 
-    def _render_next_chunk(self, chunk_size: int = 150) -> None:
+    def _render_next_chunk(self, chunk_size: int = 80) -> None:
+        if self._is_closing:
+            return
+
         analysis = self._render_analysis
         if analysis is None:
             self._set_busy_ui(False)
@@ -224,16 +325,16 @@ class PhrasalVerbApp:
             self.text.insert(tk.END, line)
             self.text.insert(tk.END, "\n")
 
-            for m in matches:
-                tag = f"verb_{m.label.replace(' ', '_')}"
-                for span_start, span_end in m.spans:
+            for match in matches:
+                tag = f"verb_{match.label.replace(' ', '_')}"
+                for span_start, span_end in match.spans:
                     start = f"{line_no}.{span_start}"
                     end_pos = f"{line_no}.{span_end}"
                     self.text.tag_add(tag, start, end_pos)
 
         self._render_index = end
         if self._render_index < len(analysis.lines):
-            self.root.after(1, self._render_next_chunk)
+            self._render_after_id = self.root.after(8, self._render_next_chunk)
             return
 
         self.text.config(state=tk.DISABLED)
@@ -245,10 +346,12 @@ class PhrasalVerbApp:
         self.is_running = busy
         state = tk.DISABLED if busy else tk.NORMAL
         self.open_btn.config(state=state)
+        self.paste_btn.config(state=state)
         self.run_btn.config(state=state)
         self.export_srt_btn.config(state=state)
         self.export_ass_btn.config(state=state)
         self.export_html_btn.config(state=state)
+        self.export_report_btn.config(state=state)
         if busy:
             self.progress.start(10)
         else:
@@ -332,11 +435,61 @@ class PhrasalVerbApp:
 
         messagebox.showinfo("Saved", f"Exported:\n{save_path}")
 
+    def export_report(self) -> None:
+        if not self.last_report:
+            messagebox.showwarning("No output", "Run analysis first.")
+            return
+
+        default_name = "phrasal_verbs_report.txt"
+        if self.current_file:
+            default_name = f"{self.current_file.stem}_phrasal_verbs_report.txt"
+
+        save_path = filedialog.asksaveasfilename(
+            title="Export phrasal verb report",
+            defaultextension=".txt",
+            initialfile=default_name,
+            filetypes=[("Text file", "*.txt"), ("All files", "*.*")],
+        )
+        if not save_path:
+            return
+
+        try:
+            Path(save_path).write_text(self.last_report, encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror("Error", f"Could not save file:\n{exc}")
+            return
+
+        messagebox.showinfo("Saved", f"Exported:\n{save_path}")
+
     def _set_text(self, value: str) -> None:
         self.text.config(state=tk.NORMAL)
         self.text.delete("1.0", tk.END)
         self.text.insert("1.0", value)
         self.text.config(state=tk.DISABLED)
+
+    def _cancel_callbacks(self) -> None:
+        if self._poll_after_id is not None:
+            try:
+                self.root.after_cancel(self._poll_after_id)
+            except tk.TclError:
+                pass
+            self._poll_after_id = None
+        if self._render_after_id is not None:
+            try:
+                self.root.after_cancel(self._render_after_id)
+            except tk.TclError:
+                pass
+            self._render_after_id = None
+
+    def _on_close(self) -> None:
+        self._is_closing = True
+        self._cancel_event.set()
+        self._cancel_callbacks()
+        self._render_analysis = None
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
 
 def main() -> None:
