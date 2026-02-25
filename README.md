@@ -11,8 +11,9 @@ python3 phrasal_verbs_gui.py
 ```
 
 In the app:
-- Click `Open subtitle` to upload your file
+- Click `Open lyrics/subtitle` to upload your file (`.txt`, `.text`, `.md`, `.lrc`, `.log`, `.csv`, `.tsv`, `.srt`, `.ass`, `.vtt`)
 - Click `Run` to detect/highlight phrasal verbs
+- The app now processes in the background with a progress indicator to keep the GUI responsive
 - Optional: set `Sync ms` to shift subtitle timing (positive = later, negative = earlier)
 - Click `Export SRT` to save a subtitle file for your video player
 - Click `Export ASS` for reliable colored subtitles (recommended for most players)
